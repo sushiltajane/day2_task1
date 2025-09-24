@@ -1,49 +1,78 @@
-name: Multi-Docker Build & Push with Trivy Scan
+name: python-docker-trivy
 
 on:
   push:
     branches:
       - main
-    paths:
-      - "Dockerfile.a"
-      - "Dockerfile.b"
-      - "Dockerfile.c"
 
 jobs:
-  build-and-scan:
+  docker:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dockerfile: [Dockerfile.a, Dockerfile.b, Dockerfile.c]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+        include:
+          - file: ./Dockerfile.a
+            tags: a
+          - file: ./Dockerfile.b
+            tags: b
+          - file: ./Dockerfile.c
+            tags: c
 
-      - name: Set image name
-        run: echo "IMAGE_NAME=${{ matrix.dockerfile }}" | sed 's/Dockerfile.//g' >> $GITHUB_ENV
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check file & first add
+        id: check
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "change=true" >> $GITHUB_OUTPUT
+          else
+            if git diff --name-only ${{ github.sha }}~1 | grep -q ${{ matrix.file }}; then
+              echo "change=true" >> $GITHUB_OUTPUT
+            else
+              echo "change=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Debug Docker Hub username
+        run: echo "Docker Hub username is ${{ secrets.DOCKERHUB_USERNAME }}"
 
       - name: Login to DockerHub
-        uses: docker/login-action@v3.5.0
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Docker image
+      - name: Build image
+        if: steps.check.outputs.change == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${{ matrix.tags }}
+
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${{ matrix.tags }}
+          format: table
+          exit-code: 0
+          vuln-type: os,library
+          ignore-unfixed: false
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          scan-ref: "docker"
+
+      - name: Scan with trivy
         run: |
-          docker build -f ${{ matrix.dockerfile }} -t ${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${IMAGE_NAME} .
+          trivy image --format json -o trivy-${{ matrix.tags }}.json "${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${{ matrix.tags }}"
+          trivy image --format table "${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${{ matrix.tags }}"
 
-      - name: Push Docker image
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${IMAGE_NAME}
-
-      - name: Run Trivy scan
-        uses: aquasecurity/trivy-action@0.20.0
+      - name: Upload trivy file
+        uses: actions/upload-artifact@v4
         with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/day1_task2:${IMAGE_NAME}
-          format: 'table'
-          output: 'trivy-${IMAGE_NAME}.txt'
-
-      - name: Upload scan report
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: trivy-scan-${IMAGE_NAME}
-          path: trivy-${IMAGE_NAME}.txt
+          name: trivy-artifact-${{ matrix.tags }}
+          path: trivy-${{ matrix.tags }}.json
