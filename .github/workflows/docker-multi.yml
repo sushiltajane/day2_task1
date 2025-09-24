@@ -1,4 +1,4 @@
-name: python-docker-trivy
+name: multi-docker
 
 on:
   push:
